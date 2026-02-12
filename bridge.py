@@ -1,7 +1,9 @@
 import asyncio
+import collections
 import html
 import json
-import os
+import threading
+import time
 
 from flask import Flask, request, jsonify
 from telegram import Bot
@@ -15,15 +17,22 @@ from bridge_config import (
 app = Flask(__name__)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+# In-memory store for message ID tracking (enables notification.update support).
+# Key: (notification_name, notification_event) -> telegram_message_id
+# Bounded to prevent unbounded memory growth; oldest entries evicted first.
+MAX_MESSAGE_STORE = 10000
+_message_store = collections.OrderedDict()
+_store_lock = threading.Lock()
+
 # Color hex to emoji mapping (matches Notifiarr's scheme)
 COLOR_MAP = {
-    '00FF00': '🟢',  # Green / Success
-    'FFFF00': '🟡',  # Yellow / Warning
-    'FF0000': '🔴',  # Red / Error
-    'FFA500': '🟠',  # Orange
-    '0000FF': '🔵',  # Blue
-    'FFFFFF': '⚪',  # White
-    '000000': '⚫',  # Black
+    '00FF00': '\U0001f7e2',  # Green / Success
+    'FFFF00': '\U0001f7e1',  # Yellow / Warning
+    'FF0000': '\U0001f534',  # Red / Error
+    'FFA500': '\U0001f7e0',  # Orange
+    '0000FF': '\U0001f535',  # Blue
+    'FFFFFF': '\u26aa',       # White
+    '000000': '\u26ab',       # Black
 }
 
 
@@ -36,6 +45,32 @@ def run_async(coro):
         loop.close()
 
 
+def _store_message_id(name, event, chat_id, message_id):
+    """Store a Telegram message_id for later update/delete by notification key."""
+    if not name:
+        return
+    key = (name, event or '')
+    with _store_lock:
+        _message_store[key] = {'chat_id': chat_id, 'message_id': message_id, 'ts': time.time()}
+        _message_store.move_to_end(key)
+        while len(_message_store) > MAX_MESSAGE_STORE:
+            _message_store.popitem(last=False)
+
+
+def _get_stored_message(name, event):
+    """Retrieve a previously stored Telegram message_id for update/delete."""
+    key = (name, event or '')
+    with _store_lock:
+        return _message_store.get(key)
+
+
+def _remove_stored_message(name, event):
+    """Remove a stored message mapping."""
+    key = (name, event or '')
+    with _store_lock:
+        _message_store.pop(key, None)
+
+
 def get_color_emoji(color_hex):
     """Convert hex color to emoji indicator."""
     if not color_hex:
@@ -43,21 +78,20 @@ def get_color_emoji(color_hex):
 
     color_hex = str(color_hex).upper().lstrip('#')
 
-    # Exact match
     if color_hex in COLOR_MAP:
         return COLOR_MAP[color_hex]
 
     # Approximate match for common colors
     if color_hex.startswith('00FF') or color_hex.startswith('0F'):
-        return '🟢'
+        return '\U0001f7e2'
     elif color_hex.startswith('FF0') or color_hex.startswith('F0'):
-        return '🟡'
+        return '\U0001f7e1'
     elif color_hex.startswith('FF') and not color_hex.startswith('FF0'):
-        return '🔴'
+        return '\U0001f534'
     elif color_hex.startswith('0'):
-        return '🔵'
+        return '\U0001f535'
 
-    return '🔘'
+    return '\U0001f518'
 
 
 def build_telegram_message(payload):
@@ -96,7 +130,7 @@ def build_telegram_message(payload):
     if description:
         parts.append(html.escape(description))
 
-    # Fields
+    # Fields (max 25 per Notifiarr spec)
     fields = text_data.get('fields', [])
     if fields:
         parts.append('')  # Blank line before fields
@@ -131,19 +165,28 @@ def build_telegram_message(payload):
     return message_text, ParseMode.HTML, thumbnail_url, image_url
 
 
-def get_telegram_chat_id(discord_channel_id):
-    """Map Discord channel ID to Telegram chat ID."""
+def get_telegram_target(discord_channel_id):
+    """Map Discord channel ID to Telegram chat_id and optional topic_id."""
     if not discord_channel_id:
         logger.warning("No Discord channel ID provided")
-        return None
+        return None, None
 
-    chat_id = CHANNEL_MAPPING.get(discord_channel_id)
+    mapping = CHANNEL_MAPPING.get(discord_channel_id)
 
-    if not chat_id:
+    if not mapping:
         logger.warning(f"No Telegram mapping found for Discord channel {discord_channel_id}")
         logger.info(f"Available mappings: {list(CHANNEL_MAPPING.keys())}")
+        return None, None
 
-    return chat_id
+    return mapping['chat_id'], mapping.get('topic_id')
+
+
+def validate_api_key():
+    """Validate the Notifiarr API key from the request header, if configured."""
+    if not NOTIFIARR_API_KEY:
+        return True
+    incoming_key = request.headers.get('x-api-key', '')
+    return incoming_key == NOTIFIARR_API_KEY
 
 
 @app.route('/health', methods=['GET'])
@@ -152,6 +195,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'mapped_channels': len(CHANNEL_MAPPING),
+        'tracked_messages': len(_message_store),
     }), 200
 
 
@@ -160,24 +204,15 @@ def notifiarr_webhook():
     """
     Receive Notifiarr passthrough webhook and forward to Telegram.
 
-    Expects Notifiarr passthrough payload format:
-    {
-        "notification": {
-            "update": bool,
-            "name": str,
-            "event": str
-        },
-        "discord": {
-            "color": str,
-            "ping": {...},
-            "images": {...},
-            "text": {...},
-            "ids": {
-                "channel": int
-            }
-        }
-    }
+    Supports:
+    - notification.update=true: edits an existing Telegram message instead of sending new
+    - Forum topics: routes to specific topic threads via channel mapping
+    - API key validation via x-api-key header (when NOTIFIARR_API_KEY is set)
     """
+    if not validate_api_key():
+        logger.warning("Rejected webhook: invalid API key")
+        return jsonify({'error': 'Unauthorized'}), 401
+
     try:
         payload = request.json
 
@@ -194,8 +229,8 @@ def notifiarr_webhook():
             logger.error("No Discord channel ID in payload")
             return jsonify({'error': 'Missing discord.ids.channel'}), 400
 
-        # Map to Telegram chat ID
-        telegram_chat_id = get_telegram_chat_id(discord_channel_id)
+        # Map to Telegram chat ID (and optional topic ID)
+        telegram_chat_id, topic_id = get_telegram_target(discord_channel_id)
 
         if not telegram_chat_id:
             return jsonify({
@@ -210,33 +245,73 @@ def notifiarr_webhook():
             logger.warning("Empty message text generated")
             message_text = "Notification received (no content)"
 
-        logger.info(f"Sending message to Telegram chat {telegram_chat_id}")
+        # Check if this is an update to an existing message
+        notification = payload.get('notification', {})
+        should_update = notification.get('update', False)
+        notif_name = notification.get('name', '')
+        notif_event = notification.get('event', '')
 
-        # Send main message (async call wrapped for sync Flask)
+        # Common kwargs for send/edit
+        send_kwargs = {
+            'chat_id': telegram_chat_id,
+            'parse_mode': parse_mode,
+        }
+        if topic_id:
+            send_kwargs['message_thread_id'] = topic_id
+
+        if should_update and notif_name:
+            stored = _get_stored_message(notif_name, notif_event)
+            if stored and stored['chat_id'] == telegram_chat_id:
+                # Update existing message
+                logger.info(f"Updating message {stored['message_id']} in chat {telegram_chat_id}")
+                try:
+                    run_async(bot.edit_message_text(
+                        text=message_text,
+                        message_id=stored['message_id'],
+                        disable_web_page_preview=True,
+                        **send_kwargs,
+                    ))
+                    # Keep the same stored entry (message_id unchanged)
+                    return jsonify({
+                        'status': 'updated',
+                        'telegram_message_id': stored['message_id'],
+                        'telegram_chat_id': telegram_chat_id,
+                        'discord_channel_id': discord_channel_id,
+                    }), 200
+                except TelegramError as e:
+                    logger.warning(f"Failed to update message, sending new: {e}")
+                    # Fall through to send a new message
+
+        # Send new message
+        logger.info(f"Sending message to Telegram chat {telegram_chat_id}" +
+                     (f" topic {topic_id}" if topic_id else ""))
+
         sent_message = run_async(bot.send_message(
-            chat_id=telegram_chat_id,
             text=message_text,
-            parse_mode=parse_mode,
             disable_web_page_preview=True,
+            **send_kwargs,
         ))
+
+        # Store message ID for future updates
+        _store_message_id(notif_name, notif_event, telegram_chat_id, sent_message.message_id)
 
         # Send thumbnail if present
         if thumbnail_url:
             try:
-                run_async(bot.send_photo(
-                    chat_id=telegram_chat_id,
-                    photo=thumbnail_url,
-                ))
+                photo_kwargs = {'chat_id': telegram_chat_id, 'photo': thumbnail_url}
+                if topic_id:
+                    photo_kwargs['message_thread_id'] = topic_id
+                run_async(bot.send_photo(**photo_kwargs))
             except TelegramError as e:
                 logger.warning(f"Failed to send thumbnail: {e}")
 
         # Send image if present (and different from thumbnail)
         if image_url and image_url != thumbnail_url:
             try:
-                run_async(bot.send_photo(
-                    chat_id=telegram_chat_id,
-                    photo=image_url,
-                ))
+                photo_kwargs = {'chat_id': telegram_chat_id, 'photo': image_url}
+                if topic_id:
+                    photo_kwargs['message_thread_id'] = topic_id
+                run_async(bot.send_photo(**photo_kwargs))
             except TelegramError as e:
                 logger.warning(f"Failed to send image: {e}")
 
@@ -262,13 +337,64 @@ def notifiarr_webhook():
         }), 500
 
 
+@app.route('/webhook', methods=['DELETE'])
+def delete_notification():
+    """
+    Delete a previously sent notification by name/event.
+
+    DELETE body:
+    {
+        "notification": {
+            "name": "App Name",
+            "event": "event_id"
+        }
+    }
+    """
+    if not validate_api_key():
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        data = request.json or {}
+        notification = data.get('notification', {})
+        name = notification.get('name', '')
+        event = notification.get('event', '')
+
+        if not name:
+            return jsonify({'error': 'notification.name required'}), 400
+
+        stored = _get_stored_message(name, event)
+        if not stored:
+            return jsonify({'error': 'No stored message found for this notification'}), 404
+
+        run_async(bot.delete_message(
+            chat_id=stored['chat_id'],
+            message_id=stored['message_id'],
+        ))
+
+        _remove_stored_message(name, event)
+
+        return jsonify({
+            'status': 'deleted',
+            'telegram_message_id': stored['message_id'],
+            'telegram_chat_id': stored['chat_id'],
+        }), 200
+
+    except TelegramError as e:
+        logger.error(f"Telegram API error on delete: {e}")
+        return jsonify({'error': 'Telegram API error', 'details': str(e)}), 500
+
+    except Exception as e:
+        logger.error(f"Delete error: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+
 @app.route('/mappings', methods=['GET'])
 def list_mappings():
     """List configured channel mappings."""
     return jsonify({
         'mappings': {
-            str(discord_id): telegram_id
-            for discord_id, telegram_id in CHANNEL_MAPPING.items()
+            str(discord_id): mapping
+            for discord_id, mapping in CHANNEL_MAPPING.items()
         }
     }), 200
 
@@ -281,22 +407,28 @@ def test_notification():
     POST body:
     {
         "telegram_chat_id": -1001234567890,
-        "message": "Test message"
+        "message": "Test message",
+        "topic_id": 123  (optional, for forum topics)
     }
     """
     try:
         data = request.json
         chat_id = data.get('telegram_chat_id')
         message = data.get('message', 'Test notification from Notifiarr-Telegram Bridge')
+        topic_id = data.get('topic_id')
 
         if not chat_id:
             return jsonify({'error': 'telegram_chat_id required'}), 400
 
-        sent = run_async(bot.send_message(
-            chat_id=chat_id,
-            text=f"✅ {message}",
-            parse_mode=ParseMode.HTML,
-        ))
+        kwargs = {
+            'chat_id': chat_id,
+            'text': f"\u2705 {message}",
+            'parse_mode': ParseMode.HTML,
+        }
+        if topic_id:
+            kwargs['message_thread_id'] = topic_id
+
+        sent = run_async(bot.send_message(**kwargs))
 
         return jsonify({
             'status': 'success',
@@ -316,6 +448,7 @@ if __name__ == '__main__':
     logger.info("Notifiarr -> Telegram Bridge Starting")
     logger.info("=" * 50)
     logger.info(f"Mapped channels: {len(CHANNEL_MAPPING)}")
+    logger.info(f"API key validation: {'enabled' if NOTIFIARR_API_KEY else 'disabled'}")
 
     if not CHANNEL_MAPPING:
         logger.warning("No channel mappings configured!")

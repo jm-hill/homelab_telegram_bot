@@ -24,8 +24,10 @@ NOTIFIARR_API_KEY = os.getenv('NOTIFIARR_API_KEY', '')
 # Server Configuration
 FLASK_PORT = int(os.getenv('BRIDGE_PORT', 5000))
 
-# Channel Mapping (Discord Channel ID -> Telegram Chat ID)
-# Load all environment variables that look like numeric keys (Discord channel IDs)
+# Channel Mapping (Discord Channel ID -> Telegram Chat ID[:Topic ID])
+# Supports two formats:
+#   DISCORD_CHANNEL_ID=TELEGRAM_CHAT_ID              (regular group)
+#   DISCORD_CHANNEL_ID=TELEGRAM_CHAT_ID:TOPIC_ID     (forum topic)
 CHANNEL_MAPPING = {}
 KNOWN_VARS = {
     'BOT_TOKEN', 'BRIDGE_BOT_TOKEN', 'NOTIFIARR_API_KEY', 'BRIDGE_PORT',
@@ -38,11 +40,22 @@ KNOWN_VARS = {
 for key, value in os.environ.items():
     if key in KNOWN_VARS:
         continue
-    # If the key is purely numeric (Discord channel ID), map it to Telegram chat ID
+    # If the key is purely numeric (Discord channel ID), map it
     if key.isdigit():
         try:
-            CHANNEL_MAPPING[int(key)] = int(value)
-            logger.info(f"Mapped Discord channel {key} -> Telegram chat {value}")
+            if ':' in value:
+                chat_id_str, topic_id_str = value.split(':', 1)
+                CHANNEL_MAPPING[int(key)] = {
+                    'chat_id': int(chat_id_str),
+                    'topic_id': int(topic_id_str),
+                }
+                logger.info(f"Mapped Discord channel {key} -> Telegram chat {chat_id_str} topic {topic_id_str}")
+            else:
+                CHANNEL_MAPPING[int(key)] = {
+                    'chat_id': int(value),
+                    'topic_id': None,
+                }
+                logger.info(f"Mapped Discord channel {key} -> Telegram chat {value}")
         except ValueError:
             logger.warning(f"Invalid channel mapping: {key}={value}")
 
