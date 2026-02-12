@@ -1,4 +1,4 @@
-# Keystone Alert Bot
+# Homelab Alerts & Management Bot
 
 A Telegram bot for monitoring services and managing Docker containers remotely.
 
