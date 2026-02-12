@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: keystone-alert-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Optional: mount for reading system files
+      - /proc:/host/proc:ro
+    networks:
+      - app_overlay
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  app_overlay:
+    external: true  # Use your existing network
