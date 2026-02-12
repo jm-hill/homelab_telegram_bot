@@ -20,6 +20,24 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  notifiarr-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: notifiarr-telegram-bridge
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    networks:
+      - app_overlay
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   app_overlay:
     external: true  # Use your existing network
