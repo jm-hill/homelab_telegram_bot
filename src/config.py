@@ -20,3 +20,7 @@ PORTAINER_TOKEN = os.getenv('PORTAINER_TOKEN')
 
 # Docker
 DOCKER_HOST = os.getenv('DOCKER_HOST', 'unix:///var/run/docker.sock')
+
+# Webhook Configuration
+WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
+WEBHOOK_CHAT_ID = os.getenv('WEBHOOK_CHAT_ID')

@@ -1,0 +1,37 @@
+ # Gitea Actions syntax is very similar to Github by design; this should work with minimal modification if using Github.
+
+name: build
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "src/**"
+      - "requirements.txt"
+      - "Dockerfile"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASS }}" | \
+          docker login git.your.domain \
+            -u "${{ secrets.REGISTRY_USER }}" \
+            --password-stdin
+
+      - name: Build image
+        run: |
+          docker build \
+            -t git.your.domain/${{ github.repository }}:latest \
+            -t git.your.domain/${{ github.repository }}:sha-${GITHUB_SHA} \
+            .
+
+      - name: Push image
+        run: |
+          docker push git.your.domain/${{ github.repository }}:latest
+          docker push git.your.domain/${{ github.repository }}:sha-${GITHUB_SHA}

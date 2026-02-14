@@ -6,6 +6,8 @@ A Telegram bot for monitoring services and managing Docker containers remotely.
 
 - **Service Monitoring**: Check HTTP status of configured services
 - **Docker Management**: List, start, stop, and restart containers
+- **Portainer Integration**: List, start, and stop Portainer stacks
+- **Webhook Alerts**: Receive alerts from external services via HTTP POST
 - **Network Tools**: Ping hosts and check connectivity
 - **System Info**: View system uptime and resource usage
 - **Security**: User authorization with Telegram user ID whitelist
@@ -22,6 +24,12 @@ A Telegram bot for monitoring services and managing Docker containers remotely.
 - `/restart <container>` - Restart a Docker container
 - `/stop <container>` - Stop a Docker container
 - `/start <container>` - Start a Docker container
+
+### Portainer
+- `/portainer` - List all stacks with status
+- `/portainer start <name>` - Start a stack
+- `/portainer stop <name>` - Stop a stack
+- `/pt` - Shorthand alias for `/portainer`
 
 ### Info
 - `/whoami` - Get your Telegram user ID
@@ -55,13 +63,21 @@ AUTHORIZED_USER_IDS=123456789,987654321
 DOCKER_HOST=unix://var/run/docker.sock
 
 # Services to monitor (optional)
-SERVICE_API=https://api.example.com
-SERVICE_WEB=https://example.com
+PROXMOX_URL=https://proxmox.yourdomain.com:8006
+PORTAINER_URL=https://portainer.yourdomain.com
+TRAEFIK_URL=https://traefik.yourdomain.com
+
+# Portainer API key (optional, required for /portainer commands)
+PORTAINER_TOKEN=your_portainer_api_key
+
+# Webhook configuration (optional)
+WEBHOOK_PORT=8080
+WEBHOOK_CHAT_ID=
 ```
 
 4. Run the bot:
 ```bash
-python bot.py
+python src/bot.py
 ```
 
 ### Docker Deployment
@@ -78,7 +94,10 @@ Configuration is managed through environment variables in the [.env](.env) file:
 - `BOT_TOKEN`: Your Telegram bot token from BotFather
 - `AUTHORIZED_USER_IDS`: Comma-separated list of Telegram user IDs allowed to use the bot
 - `DOCKER_HOST`: Docker daemon socket (default: `unix://var/run/docker.sock`)
-- `SERVICE_*`: URLs of services to monitor (e.g., `SERVICE_API`, `SERVICE_WEB`)
+- `PROXMOX_URL`, `PORTAINER_URL`, `TRAEFIK_URL`: URLs of services to monitor
+- `PORTAINER_TOKEN`: Portainer API key (required for `/portainer` commands)
+- `WEBHOOK_PORT`: HTTP port for the webhook listener (default: `8080`)
+- `WEBHOOK_CHAT_ID`: Telegram chat ID for webhook alerts (falls back to `AUTHORIZED_USER_IDS` DMs)
 
 ### Getting Your Telegram User ID
 
@@ -94,11 +113,13 @@ Configuration is managed through environment variables in the [.env](.env) file:
 
 ## Project Structure
 
-- [bot.py](bot.py) - Main bot application with command handlers
-- [config.py](config.py) - Configuration loader
+- [src/bot.py](src/bot.py) - Main bot application with command handlers
+- [src/config.py](src/config.py) - Configuration loader
+- [src/portainer.py](src/portainer.py) - Portainer API client helper
 - [requirements.txt](requirements.txt) - Python dependencies
 - [Dockerfile](Dockerfile) - Docker image definition
 - [docker-compose.yml](docker-compose.yml) - Docker Compose configuration
+- [.env.example](.env.example) - Sample environment file
 
 ## License
 
